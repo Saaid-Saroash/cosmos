@@ -1,5 +1,5 @@
 cd $env:USERPROFILE\Downloads
-python .\insta.py -s "65860131821%3Ak1e3BHlkSTnTHV%3A25%3AAYjbaOvI57PlBFt5P7FxmlbQP1zVMyCAjKbHi2c8Sgthids" -u saaid_sarosh77
+python .\insta.py -s "65860131821%3AWA3kMGqxMpJg4j%3A27%3AAYifil4vt52fcCoIGXQVuKnzdwD7d9i91OIg4_YwJg" -u saaid_sarosh77
 
 python app.py
 ___________________________________________________________________________________________________________________________________
