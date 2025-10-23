@@ -292,109 +292,177 @@ def main():
 
 if __name__ == "__main__":
     main()
-______________________________________________________________________________________________________________________________________________
-
+_________________________________________________________________________________________________________________________________
 APP.PY
 
-from flask import Flask, render_template, request, jsonify
-import requests
+#!/usr/bin/env python3
+"""
+Combined Flask + CLI Instagram follower/following tracker.
+- Run as web server (default): python app.py
+- Run CLI one-shot: python app.py --cli -s SESSIONID -u username
+- Run CLI watch mode: python app.py --cli -s SESSIONID -u username --watch 300
+
+Outputs:
+ - Serves a simple HTML UI at GET / (templates/index.html)
+ - POST /track accepts form-data: sessionid, username, user_id and returns JSON with:
+   followers, followings, followers_data, followings_data, added/removed lists since last snapshot.
+"""
+import argparse
 import json
 import os
+import sys
 import time
-from typing import Optional, Tuple, Dict
+from typing import Dict, Optional, Tuple, Set
 
-app = Flask(__name__)
+import requests
+from flask import Flask, render_template, request, jsonify
 
+# ----- Configuration -----
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
 APP_ID = "936619743392459"
-FOLLOWERS_SNAPSHOT_FILENAME = "followers_snapshot.json"
-FOLLOWINGS_SNAPSHOT_FILENAME = "followings_snapshot.json"
 TIMEOUT = 15
 PAGE_SIZE = 200
+RATE_SLEEP = 1.0  # seconds between pages
+SNAPSHOT_DIR = "snapshots"
+if not os.path.exists(SNAPSHOT_DIR):
+    os.makedirs(SNAPSHOT_DIR)
 
-# Helper functions (same as before)
+# ----- Flask app -----
+app = Flask(__name__, template_folder="templates")
+
+
 def build_session(sessionid: str) -> requests.Session:
     s = requests.Session()
     s.headers.update({
         "User-Agent": USER_AGENT,
         "Referer": "https://www.instagram.com/",
         "X-IG-App-ID": APP_ID,
-        "Accept": "*/*",
+        "Accept": "/",
         "Accept-Language": "en-US,en;q=0.9",
     })
+    # set cookie (authenticated session)
     s.cookies.set("sessionid", sessionid, domain=".instagram.com")
     return s
 
+
 def resolve_userid(session: requests.Session, username: Optional[str], userid: Optional[str]) -> Optional[Tuple[str, str]]:
+    """
+    Returns (user_id, canonical_username) or None.
+    Tries i.instagram.com web_profile_info first then public JSON fallback.
+    """
     if username:
         url = f"https://i.instagram.com/api/v1/users/web_profile_info/?username={username}"
         try:
             r = session.get(url, timeout=TIMEOUT)
-            r.raise_for_status()
-            data = r.json()
-            user = data.get("data", {}).get("user")
-            if user and ("pk" in user or "id" in user):
-                uid = str(user.get("pk") or user.get("id"))
-                uname = user.get("username") or username
-                return uid, uname
-        except requests.exceptions.RequestException as e:
-            print(f"Error resolving username {username}: {e}")
-        return None
-    if userid:
-        url = f"https://i.instagram.com/api/v1/users/{userid}/info/"
+            if r.status_code == 200:
+                data = r.json()
+                user = data.get("data", {}).get("user") or data.get("user")
+                if user and ("pk" in user or "id" in user):
+                    uid = str(user.get("pk") or user.get("id"))
+                    uname = user.get("username") or username
+                    return uid, uname
+        except Exception:
+            pass
+        # fallback: public page json
         try:
-            r = session.get(url, timeout=TIMEOUT)
-            r.raise_for_status()
-            js = r.json()
-            u = js.get("user")
-            if u and ("username" in u):
-                return str(userid), u.get("username")
-        except requests.exceptions.RequestException as e:
-            print(f"Error resolving user ID {userid}: {e}")
+            r2 = session.get(f"https://www.instagram.com/{username}/?__a=1", timeout=TIMEOUT)
+            if r2.status_code == 200:
+                js = r2.json()
+                user = js.get("graphql", {}).get("user") or js.get("user")
+                if user and ("id" in user):
+                    return str(user["id"]), user.get("username", username)
+        except Exception:
+            pass
         return None
+
+    if userid:
+        # try i.instagram.com info endpoint
+        try:
+            r = session.get(f"https://i.instagram.com/api/v1/users/{userid}/info/", timeout=TIMEOUT)
+            if r.status_code == 200:
+                js = r.json()
+                u = js.get("user")
+                if u and ("username" in u):
+                    return str(userid), u.get("username")
+        except Exception:
+            pass
+        # last resort: accept numeric id and use as username placeholder
+        return str(userid), str(userid)
+
     return None
 
-def fetch_followers(session: requests.Session, user_id: str) -> Optional[Dict[str, Dict]]:
-    return fetch_relationship_data(session, user_id, "followers")
-
-def fetch_followings(session: requests.Session, user_id: str) -> Optional[Dict[str, Dict]]:
-    return fetch_relationship_data(session, user_id, "following")
 
 def fetch_relationship_data(session: requests.Session, user_id: str, relationship: str) -> Optional[Dict[str, Dict]]:
+    """
+    relationship: "followers" or "following" (followings)
+    Returns dict mapping user_id -> {username, full_name, profile_pic_url}
+    """
     data = {}
-    url_template = f"https://i.instagram.com/api/v1/friendships/{user_id}/{relationship}/?count={PAGE_SIZE}"
+    assert relationship in ("followers", "following", "followings", "followed-by")
+    # use expected endpoint shape
+    endpoint_name = "followers" if relationship.startswith("follower") else "following"
+    url_template = f"https://i.instagram.com/api/v1/friendships/{user_id}/{endpoint_name}/?count={PAGE_SIZE}"
     next_max_id = None
     tries = 0
+
     while True:
         tries += 1
         url = url_template + (f"&max_id={next_max_id}" if next_max_id else "")
         try:
             r = session.get(url, timeout=TIMEOUT)
-            r.raise_for_status()
-        except requests.exceptions.RequestException as e:
-            print(f"Error fetching {relationship}: {e}")
+        except Exception as e:
+            print(f"Network error fetching {relationship}: {e}")
             return None
 
-        js = r.json()
-        users = js.get("users", [])
-        for u in users:
-            pk = str(u.get("pk") or u.get("id"))
-            data[pk] = {
-                "username": u.get("username"),
-                "full_name": u.get("full_name"),
-                "profile_pic_url": u.get("profile_pic_url") or u.get("profile_pic_url_hd"),
-            }
+        if r.status_code == 200:
+            try:
+                js = r.json()
+            except ValueError:
+                print("Non-JSON response while fetching relationships.")
+                return None
 
-        next_max_id = js.get("next_max_id")
-        if not next_max_id:
+            users = js.get("users") or js.get("items") or []
+            for u in users:
+                pk = str(u.get("pk") or u.get("id"))
+                data[pk] = {
+                    "username": u.get("username"),
+                    "full_name": u.get("full_name") or "",
+                    "profile_pic_url": u.get("profile_pic_url") or u.get("profile_pic_url_hd") or "",
+                }
+
+            # pagination tokens vary between endpoints
+            next_max_id = js.get("next_max_id") or js.get("next_cursor") or js.get("next_max_id")
+            more_available = js.get("more_available") or js.get("more")
+            if not next_max_id and not more_available:
+                break
+
+            if not users:
+                break
+
+            time.sleep(RATE_SLEEP)
+
+        elif r.status_code == 429:
+            print("Rate limited (429). Back off and try later.")
+            return None
+        else:
+            print(f"Failed to fetch {relationship} (HTTP {r.status_code}).")
+            return None
+
+        if tries > 500:
+            print("Too many pages, aborting.")
             break
-        time.sleep(1.0)
 
     return data
+
+
+def snapshot_filename(kind: str, target_uid: str) -> str:
+    # kind = 'followers' or 'followings'
+    return os.path.join(SNAPSHOT_DIR, f"{kind}_{target_uid}.json")
+
 
 def load_snapshot(filename: str) -> Dict[str, Dict]:
     if not os.path.exists(filename):
@@ -402,52 +470,174 @@ def load_snapshot(filename: str) -> Dict[str, Dict]:
     try:
         with open(filename, "r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception as e:
-        print(f"Error loading snapshot: {e}")
+    except Exception:
         return {}
+
 
 def save_snapshot(data: Dict[str, Dict], filename: str):
     try:
         with open(filename, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
     except Exception as e:
-        print(f"Error saving snapshot: {e}")
+        print(f"Failed to save snapshot {filename}: {e}")
 
-@app.route('/')
-def home():
-    return render_template('index.html')
 
-@app.route('/track', methods=['POST'])
+def diff_sets(old: Dict[str, Dict], new: Dict[str, Dict]):
+    old_set = set(old.keys())
+    new_set = set(new.keys())
+    added = sorted(list(new_set - old_set))
+    removed = sorted(list(old_set - new_set))
+    return added, removed
+
+
+# --- Flask routes ---
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
+@app.route("/track", methods=["POST"])
 def track():
-    sessionid = request.form['sessionid']
-    username = request.form.get('username')
-    user_id = request.form.get('user_id')
+    sessionid = request.form.get("sessionid")
+    username = request.form.get("username")
+    user_id = request.form.get("user_id")
+
+    if not sessionid:
+        return jsonify({"error": "Session ID is required"}), 400
     if not username and not user_id:
-        return jsonify({'error': 'Provide either username or user_id'}), 400
+        return jsonify({"error": "Provide either username or user_id"}), 400
 
     session = build_session(sessionid)
     resolved = resolve_userid(session, username, user_id)
     if not resolved:
-        return jsonify({'error': 'Could not resolve user'}), 400
+        return jsonify({"error": "Could not resolve user (check username/id or session permissions)"}), 400
 
     target_uid, canonical_username = resolved
-    followers = fetch_followers(session, target_uid)
-    followings = fetch_followings(session, target_uid)
+
+    followers = fetch_relationship_data(session, target_uid, "followers")
+    followings = fetch_relationship_data(session, target_uid, "following")
 
     if followers is None or followings is None:
-        return jsonify({'error': 'Failed to fetch data'}), 500
+        return jsonify({"error": "Failed to fetch data (possibly rate-limited or invalid session)"}), 500
 
-    # Optionally, you can process the diff between old and new snapshots here
-    save_snapshot(followers, FOLLOWERS_SNAPSHOT_FILENAME)
-    save_snapshot(followings, FOLLOWINGS_SNAPSHOT_FILENAME)
+    # load previous snapshots to compute diff
+    followers_file = snapshot_filename("followers", target_uid)
+    followings_file = snapshot_filename("followings", target_uid)
+    old_followers = load_snapshot(followers_file)
+    old_followings = load_snapshot(followings_file)
+
+    added_followers, removed_followers = diff_sets(old_followers, followers)
+    added_followings, removed_followings = diff_sets(old_followings, followings)
+
+    # save new snapshots
+    save_snapshot(followers, followers_file)
+    save_snapshot(followings, followings_file)
+
+    # build compact diff info
+    def compact(list_ids, src):
+        return [{"id": i, "username": src.get(i, {}).get("username"), "full_name": src.get(i, {}).get("full_name")} for i in list_ids]
 
     return jsonify({
-        'followers': len(followers),
-        'followings': len(followings),
-        'followers_data': followers,
-        'followings_data': followings
+        "username": canonical_username,
+        "user_id": target_uid,
+        "followers": len(followers),
+        "followings": len(followings),
+        "followers_data": followers,
+        "followings_data": followings,
+        "diff": {
+            "followers_added": compact(added_followers, followers),
+            "followers_removed": compact(removed_followers, old_followers),
+            "followings_added": compact(added_followings, followings),
+            "followings_removed": compact(removed_followings, old_followings)
+        }
     })
 
-if __name__ == '__main__':
-    app.run(debug=True)
-___________________________________________________________________________________________________________________________________________
+
+# --- CLI utilities (reuse above functions) ---
+def print_changes(added: Set[str], removed: Set[str], old: Dict[str, Dict], new: Dict[str, Dict]):
+    if not added and not removed:
+        print("No changes since last snapshot.")
+        return
+    if added:
+        print(f"\n➕ New ({len(added)}):")
+        for pk in sorted(added):
+            info = new.get(pk, {})
+            print(f"  - {info.get('username') or '(unknown)'} (id: {pk}) {info.get('full_name') or ''}")
+    if removed:
+        print(f"\n➖ Removed ({len(removed)}):")
+        for pk in sorted(removed):
+            info = old.get(pk, {})
+            print(f"  - {info.get('username') or '(unknown)'} (id: {pk}) {info.get('full_name') or ''}")
+
+
+def run_once_cli(sessionid: str, username: Optional[str], userid: Optional[str], snapshot_prefix: Optional[str] = None):
+    session = build_session(sessionid)
+    resolved = resolve_userid(session, username, userid)
+    if not resolved:
+        print("Could not resolve target account. Check username/id and session permissions.")
+        return
+    target_uid, canonical_username = resolved
+    print(f"Fetching for {canonical_username} (id {target_uid}) ...")
+
+    followers = fetch_relationship_data(session, target_uid, "followers")
+    followings = fetch_relationship_data(session, target_uid, "following")
+    if followers is None or followings is None:
+        print("Failed to fetch (rate-limited/invalid session).")
+        return
+
+    followers_file = snapshot_filename("followers", target_uid)
+    followings_file = snapshot_filename("followings", target_uid)
+    old_followers = load_snapshot(followers_file)
+    old_followings = load_snapshot(followings_file)
+
+    added_f, removed_f = diff_sets(old_followers, followers)
+    added_g, removed_g = diff_sets(old_followings, followings)
+
+    print("\nFollowers:")
+    print(f"  Current: {len(followers)}  Previous snapshot: {len(old_followers)}")
+    print_changes(added_f, removed_f, old_followers, followers)
+
+    print("\nFollowings:")
+    print(f"  Current: {len(followings)}  Previous snapshot: {len(old_followings)}")
+    print_changes(added_g, removed_g, old_followings, followings)
+
+    # Save snapshots
+    save_snapshot(followers, followers_file)
+    save_snapshot(followings, followings_file)
+    print(f"\nSnapshots saved: {followers_file}, {followings_file}")
+
+
+def main_cli():
+    parser = argparse.ArgumentParser(description="Combined Instagram follower/following tracker (CLI or run Flask server).")
+    parser.add_argument("--cli", action="store_true", help="Run in CLI mode (one-shot or watch). If omitted the Flask server starts.")
+    parser.add_argument("-s", "--sessionid", help="Instagram sessionid (cookie)")
+    parser.add_argument("-u", "--username", help="Target username")
+    parser.add_argument("-i", "--id", help="Target numeric user id")
+    parser.add_argument("--watch", type=int, nargs="?", const=300, help="Watch mode interval seconds (optional)")
+    parser.add_argument("--host", default="0.0.0.0", help="If serving Flask, host (default 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=5000, help="Flask port (default 5000)")
+    args = parser.parse_args()
+
+    if args.cli:
+        if not args.sessionid or (not args.username and not args.id):
+            parser.error("CLI mode requires --sessionid and either --username or --id")
+        try:
+            if args.watch:
+                interval = int(args.watch)
+                print(f"Entering watch mode. Interval: {interval}s. Ctrl+C to stop.")
+                while True:
+                    run_once_cli(args.sessionid, args.username, args.id)
+                    time.sleep(interval)
+            else:
+                run_once_cli(args.sessionid, args.username, args.id)
+        except KeyboardInterrupt:
+            print("\nStopped by user.")
+            sys.exit(0)
+    else:
+        # Start Flask server
+        print(f"Starting Flask server on http://{args.host}:{args.port}")
+        app.run(host=args.host, port=args.port, debug=True)
+
+
+if __name__ == "__main__":
+    main_cli()
