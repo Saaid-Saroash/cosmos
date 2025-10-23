@@ -1,1 +1,344 @@
+cd "$HOME\Documents\HandMouse"
+handenv\Scripts\activate
+python hand_mouse.py
+_________________________________________________________________________________________________________________________________
+python 3.11 (or below)
+Microsoft Visual C++ Redistributable (2015 or older)
+Create project folder: Documents > HandMouse > hand_mouse.py
 
+python -m venv handenv
+handenv\Scripts\activate
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser ------> (if not activating)
+
+pip install numpy==1.23.5
+pip install opencv-python==4.8.0.76
+pip install mediapipe==0.10.8
+pip install pyautogui
+pip install mouse
+
+python hand_mouse.py
+
+hand_mouse.py
+______________________________________________________________________________________________________________________________________
+"""
+Professional Hand Mouse with camera cycling (press C to cycle cameras)
+- Save as hand_mouse.py and run: python hand_mouse.py
+Controls:
+ q = quit
+ [ = less smoothing (more responsive)
+ ] = more smoothing (smoother, slower)
+ m = toggle mirror
+ c = cycle cameras (auto-detect available cams 0..5)
+Gesture behavior (Professional):
+ - Move: index finger -> moves cursor
+ - Left click: quick pinch (index + thumb)
+ - Drag & drop: pinch and hold > DRAG_HOLD_TIME -> mouseDown (release -> mouseUp)
+ - Right click: pinch index + middle (quick)
+ - Scroll: index vertical posture (index tip vs pip) -> scroll
+"""
+
+import time, math
+from collections import deque
+import cv2
+import mediapipe as mp
+import numpy as np
+import pyautogui
+
+# ---------------- CONFIG ----------------
+SEARCH_CAM_RANGE = range(0, 6)   # range of camera indices to probe
+CAM_W, CAM_H = 320, 240
+MODEL_COMPLEXITY = 0
+MIN_DET = 0.6
+MIN_TRACK = 0.6
+
+SMOOTHING = 0.18         # 0..1 (lower = more responsive)
+MEDIAN_WINDOW = 5
+THROTTLE_HZ = 40
+
+PINCH_THRESHOLD = 0.045      # thumb-index pinch (normalized)
+RIGHT_PINCH_THRESHOLD = 0.055
+CLICK_DEBOUNCE = 0.30
+TAP_MAX = 0.25
+DRAG_HOLD_TIME = 0.35
+SCROLL_SENS = 160
+MIRROR = True
+# ----------------------------------------
+
+pyautogui.FAILSAFE = False
+screen_w, screen_h = pyautogui.size()
+
+mp_hands = mp.solutions.hands
+hands_proc = None  # will create after imports
+
+def create_hands(max_num_hands=2):
+    return mp_hands.Hands(
+        max_num_hands=max_num_hands,
+        model_complexity=MODEL_COMPLEXITY,
+        min_detection_confidence=MIN_DET,
+        min_tracking_confidence=MIN_TRACK,
+    )
+
+# utility functions
+def normalized_distance(a, b):
+    return math.hypot(a.x - b.x, a.y - b.y)
+
+def clamp(v, a, b):
+    return max(a, min(b, v))
+
+def median_point(buffer):
+    if not buffer:
+        return None, None
+    arr = np.array(buffer)
+    return float(np.median(arr[:,0])), float(np.median(arr[:,1]))
+
+def map_to_screen(nx, ny, mirror=MIRROR):
+    if mirror:
+        sx = screen_w * nx
+    else:
+        sx = screen_w * (1 - nx)
+    sy = screen_h * ny
+    return sx, sy
+
+# discover available cameras (tries to open briefly)
+def find_cameras(max_index=5):
+    cams = []
+    for i in range(max_index + 1):
+        cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+        if cap is None or not cap.isOpened():
+            try:
+                cap.release()
+            except Exception:
+                pass
+            continue
+        # read one frame to be sure
+        ret, _ = cap.read()
+        if ret:
+            cams.append(i)
+        cap.release()
+    return cams
+
+# pick "active" hand when multiple hands detected:
+# choose hand whose index fingertip is closest to image center (normalized)
+def choose_active_hand(results):
+    # returns index into results.multi_hand_landmarks (0..n-1)
+    if not results.multi_hand_landmarks:
+        return None
+    h, w = 1.0, 1.0  # working in normalized coords
+    cx, cy = 0.5, 0.5
+    best_idx = 0
+    best_dist = None
+    for i, hand in enumerate(results.multi_hand_landmarks):
+        idx = hand.landmark[8]
+        d = math.hypot(idx.x - cx, idx.y - cy)
+        if best_dist is None or d < best_dist:
+            best_dist = d
+            best_idx = i
+    return best_idx
+
+# ---------- State ----------
+pos_buffer = deque(maxlen=MEDIAN_WINDOW)
+last_move_time = 0.0
+last_left_time = 0.0
+last_right_time = 0.0
+smoothed_x = None
+smoothed_y = None
+
+pinching = False
+pinch_start = None
+dragging = False
+
+# camera state
+available_cams = find_cameras(max_index=5)
+if not available_cams:
+    print("No camera detected. Make sure your webcam is connected.")
+    raise SystemExit(1)
+cam_index_pointer = 0
+current_cam_index = available_cams[cam_index_pointer]
+
+# open capture
+cap = cv2.VideoCapture(current_cam_index, cv2.CAP_DSHOW)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_W)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_H)
+
+hands_proc = create_hands(max_num_hands=2)
+
+print("Hand Mouse started.")
+print("Cameras found:", available_cams)
+print("Press C to cycle cameras, q to quit, [ ] adjust smoothing, m toggle mirror.")
+
+try:
+    while True:
+        now = time.time()
+        ret, frame = cap.read()
+        if not ret:
+            # try to reopen camera once quickly
+            cap.release()
+            time.sleep(0.1)
+            cap = cv2.VideoCapture(current_cam_index, cv2.CAP_DSHOW)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_W)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_H)
+            time.sleep(0.02)
+            continue
+
+        frame = cv2.flip(frame, 1)  # mirror preview & landmarks
+        h, w, _ = frame.shape
+        img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        results = hands_proc.process(img_rgb)
+
+        info = f"Smooth={SMOOTHING:.3f} Mirror={'ON' if MIRROR else 'OFF'} Cam={current_cam_index}"
+
+        if results.multi_hand_landmarks and len(results.multi_hand_landmarks) > 0:
+            # choose active hand
+            idx_hand = choose_active_hand(results)
+            hand = results.multi_hand_landmarks[idx_hand]
+            lm = hand.landmark
+
+            # index, thumb, middle normalized
+            idx_lm = lm[8]
+            thumb_lm = lm[4]
+            mid_lm = lm[12]
+
+            # add normalized index to median buffer
+            pos_buffer.append((idx_lm.x, idx_lm.y))
+            med_xn, med_yn = median_point(pos_buffer)
+            if med_xn is None:
+                continue
+
+            # map to screen and exponential smoothing
+            target_x, target_y = map_to_screen(med_xn, med_yn, mirror=MIRROR)
+            if smoothed_x is None:
+                smoothed_x, smoothed_y = target_x, target_y
+            else:
+                smoothed_x = smoothed_x + (target_x - smoothed_x) * (1 - SMOOTHING)
+                smoothed_y = smoothed_y + (target_y - smoothed_y) * (1 - SMOOTHING)
+
+            # throttle mouse updates
+            if now - last_move_time >= 1.0 / THROTTLE_HZ:
+                dx = abs(smoothed_x - pyautogui.position().x)
+                dy = abs(smoothed_y - pyautogui.position().y)
+                if dx > 1 or dy > 1:
+                    tx = clamp(smoothed_x, 0, screen_w - 1)
+                    ty = clamp(smoothed_y, 0, screen_h - 1)
+                    try:
+                        pyautogui.moveTo(int(tx), int(ty), duration=0)
+                    except Exception:
+                        pass
+                last_move_time = now
+
+            # detect pinches (normalized distances)
+            pinch_dist = normalized_distance(idx_lm, thumb_lm)
+            right_pinch_dist = normalized_distance(idx_lm, mid_lm)
+
+            # LEFT pinch & drag logic
+            if pinch_dist < PINCH_THRESHOLD:
+                if not pinching:
+                    pinching = True
+                    pinch_start = now
+                else:
+                    # held pinch -> start drag if time passed
+                    if (not dragging) and (now - pinch_start >= DRAG_HOLD_TIME):
+                        try:
+                            pyautogui.mouseDown()
+                            dragging = True
+                        except Exception:
+                            dragging = False
+            else:
+                if pinching:
+                    duration = now - (pinch_start or now)
+                    if dragging:
+                        # finish drag
+                        try:
+                            pyautogui.mouseUp()
+                        except Exception:
+                            pass
+                        dragging = False
+                        last_left_time = now
+                    else:
+                        # tap
+                        if duration <= TAP_MAX and (now - last_left_time > CLICK_DEBOUNCE):
+                            pyautogui.click()
+                            last_left_time = now
+                    pinching = False
+                    pinch_start = None
+
+            # RIGHT click (index+middle)
+            if (not dragging) and (not pinching) and (right_pinch_dist < RIGHT_PINCH_THRESHOLD):
+                if now - last_right_time > CLICK_DEBOUNCE:
+                    pyautogui.click(button='right')
+                    last_right_time = now
+
+            # SCROLL using index tip vs pip (vertical posture)
+            dy_norm = lm[8].y - lm[6].y
+            if dy_norm > 0.08:
+                pyautogui.scroll(-int(dy_norm * SCROLL_SENS))
+            elif dy_norm < -0.08:
+                pyautogui.scroll(int(-dy_norm * SCROLL_SENS))
+
+            # draw landmarks of active hand
+            mp.solutions.drawing_utils.draw_landmarks(frame, hand, mp_hands.HAND_CONNECTIONS)
+
+            status = "DRAGGING" if dragging else ("PINCH" if pinching else "")
+        else:
+            pos_buffer.clear()
+            status = ""
+
+        # overlays
+        cv2.putText(frame, info, (6, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200,200,200), 1)
+        cv2.putText(frame, "Controls: [ ] smoothing  m mirror  c cycle cam  q quit", (6, h - 18),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180,180,180), 1)
+        if status:
+            cv2.putText(frame, status, (6, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,200,0), 2)
+
+        cv2.imshow("Hand Mouse", frame)
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            break
+        elif key == ord('['):
+            # less smoothing -> more responsive
+            SMOOTHING = clamp(SMOOTHING - 0.05, 0.0, 0.98)
+        elif key == ord(']'):
+            # more smoothing -> smoother & slower
+            SMOOTHING = clamp(SMOOTHING + 0.05, 0.0, 0.98)
+        elif key == ord('m'):
+            MIRROR = not MIRROR
+        elif key == ord('c'):
+            # cycle cameras
+            # find cams fresh (in case devices changed)
+            available_cams = find_cameras(max_index=5)
+            if not available_cams:
+                print("No cameras available.")
+            else:
+                cam_index_pointer = (available_cams.index(current_cam_index) + 1) % len(available_cams) if current_cam_index in available_cams else 0
+                current_cam_index = available_cams[cam_index_pointer]
+                # reopen capture
+                cap.release()
+                cap = cv2.VideoCapture(current_cam_index, cv2.CAP_DSHOW)
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_W)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_H)
+                # small reset of buffers
+                pos_buffer.clear()
+                smoothed_x = None
+                smoothed_y = None
+                print("Switched to camera", current_cam_index)
+
+        # tiny sleep to avoid busy-loop
+        time.sleep(0.001)
+
+finally:
+    # ensure mouse is released if dragging when exiting
+    try:
+        if dragging:
+            pyautogui.mouseUp()
+    except Exception:
+        pass
+    try:
+        cap.release()
+    except Exception:
+        pass
+    cv2.destroyAllWindows()
+    try:
+        hands_proc.close()
+    except Exception:
+        pass
