@@ -10,7 +10,7 @@ python -m venv venv
 pip install requests
 pip install flask
 
-INSTA.PY
+APP.PY
 ________________________________________________________________________________________________________________________________________
 #!/usr/bin/env python3
 """
@@ -358,3 +358,358 @@ def main_cli():
 
 if __name__ == "__main__":
     main_cli()
+_________________________________________________________________________________________________________________________________
+templates ------> index.html
+INDEX.HTML
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Instagram Follower & Following Tracker</title>
+    <style>
+        :root{
+            --bg:#fafafa;
+            --card:#fff;
+            --muted:#666;
+            --accent:#4CAF50;
+            --danger:#e74c3c;
+            --pad:12px;
+        }
+
+        *{box-sizing:border-box}
+        body {
+            margin:0;
+            font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif;
+            background:var(--bg);
+            color:#222;
+            -webkit-font-smoothing:antialiased;
+            -moz-osx-font-smoothing:grayscale;
+            padding:18px;
+        }
+
+        h1 { text-align:center; margin:6px 0 14px; font-size:20px; color:#222; }
+        .container { max-width:980px; margin:0 auto; }
+
+        /* Form */
+        .form-card {
+            background:var(--card);
+            padding:var(--pad);
+            border-radius:10px;
+            box-shadow:0 8px 20px rgba(0,0,0,0.04);
+            margin-bottom:12px;
+        }
+        .form-row { display:flex; gap:10px; flex-wrap:wrap; }
+        .form-row input {
+            flex:1 1 220px;
+            padding:10px;
+            border:1px solid #e6e6e6;
+            border-radius:8px;
+            font-size:15px;
+        }
+        button {
+            background:var(--accent);
+            color:#fff;
+            border:0;
+            padding:10px 14px;
+            border-radius:8px;
+            cursor:pointer;
+            font-size:15px;
+            min-width:120px;
+        }
+        .small { font-size:13px; color:var(--muted); margin-top:8px; }
+
+        .error { color:var(--danger); text-align:center; margin-top:10px; }
+
+        /* Card for results */
+        .card {
+            background:var(--card);
+            padding:var(--pad);
+            border-radius:10px;
+            box-shadow:0 6px 18px rgba(0,0,0,0.03);
+            margin-bottom:12px;
+        }
+
+        .row { display:flex; gap:12px; flex-wrap:wrap; align-items:baseline; }
+        .stat { flex:1 1 160px; font-weight:600; }
+
+        /* Responsive table wrapper */
+        .table-responsive {
+            width:100%;
+            overflow-x:auto;
+            -webkit-overflow-scrolling:touch;
+            border-radius:8px;
+            border:1px solid #efefef;
+            background:#fff;
+            margin-top:8px;
+        }
+        table {
+            width:100%;
+            border-collapse:collapse;
+            min-width:480px; /* allows horizontal scroll on narrow screens */
+        }
+        th, td {
+            padding:10px 12px;
+            border-bottom:1px solid #f2f2f2;
+            text-align:left;
+            font-size:14px;
+        }
+        th {
+            position:relative;
+            background:#fbfbfb;
+            font-weight:700;
+            top:0;
+        }
+        tbody tr:hover { background:#fafafa; }
+
+        /* Removed styling (highlight in red) */
+        tr.removed { color: var(--danger); background: #fff4f4; }
+
+        /* Account Update tag */
+        .account-update-title { display:flex; align-items:center; gap:10px; }
+        .badge {
+            background:var(--accent); color:#fff; padding:6px 9px; border-radius:8px; font-size:13px; font-weight:700;
+        }
+
+        /* Smaller devices */
+        @media (max-width:600px) {
+            body { padding:12px; }
+            h1 { font-size:18px; }
+            .form-row input { font-size:14px; padding:9px; }
+            button { font-size:14px; padding:9px; }
+            th, td { padding:8px 10px; font-size:13px; }
+            table { min-width:380px; }
+            .stat { font-size:14px; }
+        }
+
+        /* Very small devices */
+        @media (max-width:380px) {
+            .form-row { flex-direction:column; }
+            table { min-width:320px; }
+        }
+
+        /* Accessibility */
+        .sr-only { position:absolute; left:-9999px; top:auto; width:1px; height:1px; overflow:hidden; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Instagram Follower & Following Tracker</h1>
+
+        <div class="form-card">
+            <form id="trackForm" onsubmit="return false;">
+                <div class="form-row">
+                    <input id="sessionid" type="text" placeholder="Your Session ID (required)" autocomplete="off" />
+                    <input id="username" type="text" placeholder="Username (optional)" autocomplete="off" />
+                    <input id="user_id" type="text" placeholder="User ID (optional)" autocomplete="off" />
+                    <button id="trackButton" type="button">Track</button>
+                </div>
+                <div class="small">Only use your own sessionid. Frequent requests may be rate-limited by Instagram.</div>
+            </form>
+        </div>
+
+        <div id="errorMessage" class="error" role="alert" aria-live="assertive"></div>
+
+        <!-- ACCOUNT UPDATE (moved to front) -->
+        <div id="accountUpdateCard" class="card" style="display:none;">
+            <div class="account-update-title">
+                <div class="badge">Account Update</div>
+                <div>
+                    <div id="targetInfo" style="font-weight:700;"></div>
+                    <div class="small" id="updateTime"></div>
+                </div>
+            </div>
+
+            <div class="table-responsive" aria-live="polite" style="margin-top:12px;">
+                <table id="accountUpdateTable" role="table" aria-describedby="updateTime">
+                    <thead>
+                        <tr>
+                            <th>Category</th>
+                            <th>Username</th>
+                            <th>Full name</th>
+                            <th>ID</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Totals & Lists -->
+        <div id="resultsCard" class="card" style="display:none;">
+            <div class="row" style="margin-bottom:8px;">
+                <div class="stat" id="followersCount">Followers: —</div>
+                <div class="stat" id="followingsCount">Followings: —</div>
+            </div>
+
+            <div style="display:flex; gap:12px; flex-wrap:wrap;">
+                <div style="flex:1 1 320px; min-width:260px;">
+                    <div style="font-weight:700; margin-bottom:6px;">Followers</div>
+                    <div class="table-responsive">
+                        <table id="followersTable" aria-label="Followers table">
+                            <thead><tr><th>Username</th><th>Full name</th></tr></thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div style="flex:1 1 320px; min-width:260px;">
+                    <div style="font-weight:700; margin-bottom:6px;">Followings</div>
+                    <div class="table-responsive">
+                        <table id="followingsTable" aria-label="Followings table">
+                            <thead><tr><th>Username</th><th>Full name</th></tr></thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Not following back (full width) -->
+            <div style="margin-top:12px;">
+                <div style="font-weight:700; margin-bottom:6px;">Not following back (you follow them; they don't follow you)</div>
+                <div class="table-responsive">
+                    <table id="notFollowingBackTable" aria-label="Accounts not following back">
+                        <thead><tr><th>Username</th><th>Full name</th></tr></thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+    // Helper to create row element from columns array
+    function makeRow(cols) {
+        const tr = document.createElement('tr');
+        for (const c of cols) {
+            const td = document.createElement('td');
+            td.textContent = c ?? '';
+            tr.appendChild(td);
+        }
+        return tr;
+    }
+
+    document.getElementById('trackButton').addEventListener('click', async () => {
+        // reset UI
+        document.getElementById('errorMessage').textContent = '';
+        document.getElementById('accountUpdateCard').style.display = 'none';
+        document.getElementById('resultsCard').style.display = 'none';
+        const sess = document.getElementById('sessionid').value.trim();
+        const username = document.getElementById('username').value.trim();
+        const user_id = document.getElementById('user_id').value.trim();
+
+        if (!sess) {
+            document.getElementById('errorMessage').textContent = 'Session ID is required';
+            return;
+        }
+
+        try {
+            const body = new URLSearchParams();
+            body.append('sessionid', sess);
+            if (username) body.append('username', username);
+            if (user_id) body.append('user_id', user_id);
+
+            const resp = await fetch('/track', { method: 'POST', body });
+            if (!resp.ok) {
+                // try parse JSON error
+                let txt = await resp.text();
+                try {
+                    const js = JSON.parse(txt);
+                    throw new Error(js.error || `HTTP ${resp.status}`);
+                } catch (e) {
+                    throw new Error(`HTTP ${resp.status}`);
+                }
+            }
+            const data = await resp.json();
+
+            // Account update table (combined diffs first)
+            const updateTbody = document.querySelector('#accountUpdateTable tbody');
+            updateTbody.innerHTML = '';
+
+            const pushRows = (categoryName, arr) => {
+                (arr || []).forEach(item => {
+                    updateTbody.appendChild(makeRow([categoryName, item.username || '', item.full_name || '', item.id || '']));
+                });
+            };
+
+            const diff = data.diff || {};
+            pushRows('Followers added', diff.followers_added || []);
+            pushRows('Followers removed', diff.followers_removed || []);
+            pushRows('Followings added', diff.followings_added || []);
+            pushRows('Followings removed', diff.followings_removed || []);
+
+            // show "no changes" row if empty
+            if (updateTbody.children.length === 0) {
+                updateTbody.appendChild(makeRow(['No changes', '', '', '']));
+            }
+
+            // header info
+            document.getElementById('targetInfo').textContent = `${data.username} (id: ${data.user_id})`;
+            document.getElementById('updateTime').textContent = `Last checked: ${new Date().toLocaleString()}`;
+
+            document.getElementById('accountUpdateCard').style.display = 'block';
+
+            // Totals and full lists
+            document.getElementById('followersCount').textContent = `Followers: ${data.followers}`;
+            document.getElementById('followingsCount').textContent = `Followings: ${data.followings}`;
+
+            // Populate followers table and mark removed in red
+            const fbody = document.querySelector('#followersTable tbody');
+            fbody.innerHTML = '';
+            if (data.followers_data && typeof data.followers_data === 'object') {
+                // iterate keys for stable output
+                const keys = Object.keys(data.followers_data).sort((a,b)=>{
+                    const A = (data.followers_data[a].username||'').toLowerCase();
+                    const B = (data.followers_data[b].username||'').toLowerCase();
+                    return A.localeCompare(B);
+                });
+                for (const id of keys) {
+                    const u = data.followers_data[id] || {};
+                    const tr = makeRow([u.username || '', u.full_name || '']);
+                    if (u.removed) tr.classList.add('removed');
+                    fbody.appendChild(tr);
+                }
+            }
+
+            // Populate followings table and mark removed in red
+            const gbody = document.querySelector('#followingsTable tbody');
+            gbody.innerHTML = '';
+            if (data.followings_data && typeof data.followings_data === 'object') {
+                const keys = Object.keys(data.followings_data).sort((a,b)=>{
+                    const A = (data.followings_data[a].username||'').toLowerCase();
+                    const B = (data.followings_data[b].username||'').toLowerCase();
+                    return A.localeCompare(B);
+                });
+                for (const id of keys) {
+                    const u = data.followings_data[id] || {};
+                    const tr = makeRow([u.username || '', u.full_name || '']);
+                    if (u.removed) tr.classList.add('removed');
+                    gbody.appendChild(tr);
+                }
+            }
+
+            // Populate Not following back table (array)
+            const nfbBody = document.querySelector('#notFollowingBackTable tbody');
+            nfbBody.innerHTML = '';
+            const nfb = data.not_following_back || [];
+            if (Array.isArray(nfb) && nfb.length) {
+                // sort by username
+                nfb.sort((a,b)=> (a.username||'').localeCompare(b.username||''));
+                for (const u of nfb) {
+                    nfbBody.appendChild(makeRow([u.username || '', u.full_name || '']));
+                }
+            } else {
+                nfbBody.appendChild(makeRow(['No accounts found', '']));
+            }
+
+            document.getElementById('resultsCard').style.display = 'block';
+        } catch (err) {
+            console.error(err);
+            document.getElementById('errorMessage').textContent = 'Error: ' + (err.message || err);
+        }
+    });
+    </script>
+</body>
+</html>
